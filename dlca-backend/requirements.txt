@@ -1,0 +1,10 @@
+flask
+openai>=1.0.0
+python-dotenv
+neo4j
+flask_cors
+pyarrow
+requests
+matplotlib
+pandas
+numpy
