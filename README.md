@@ -1,5 +1,9 @@
 # DLCA Platform Prototype
 
+**This is the platform prototype of GraphDLCA. The related publication is Graph-based database structure and calculation framework for automated dynamic life cycle assessment of buildings, available: https://doi.org/10.1016/j.autcon.2026.107183.** 
+
+**The original code is available upon request. For differences, please always refer to the original code and descriptions in the publication.**
+
 This repository contains the source code of the DLCA platform prototype, including:
 
 - `dlca-frontend/` – React + Vite frontend
