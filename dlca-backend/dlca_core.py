@@ -149,7 +149,7 @@ dynamic_scenario = "Carbon Neutral" #Carbon Neutral or Business As Usual
 
 
 #------------------------Defining levels
-level="Building" #Building, Building_Component, Building_Material (CURRENTLY NOT WORKING!)
+level="Building" #Building, Building_Component, Building_Material
 building_list_api = False
 
 #For the building material level, building material name and the rough component group should be defined!
@@ -207,12 +207,6 @@ if level=="Building" and building_list_api != True:
                      "power_system": power_type,
                      "heating_system": heat_type,
                      "total_floor_area": total_floor_area}]
-
-# elif level=="Building" and building_list_api == True:
-  #  choose_study = "m1t1d1l1_1"
-  #  building_list_df = pd.read_parquet(choose_study + '.parquet')
-   # building_list = building_list_df.to_dict('records')
-    #building_list = building_list[:2]
 
 show_plots = False
 
@@ -1270,7 +1264,7 @@ def read_db_b345(dynamic_factor, driver, URI, AUTH):
                     i[4]=[df_query_result_b4_powermix_amount,df_query_result_b4_energysource_amount,df_query_result_b4_dynamic_ratio]
         
         
-        #hea
+        #heat
         df_query_result_b4_final_heat=[]
         
         for i in df_query_result_heat.index:
@@ -1390,8 +1384,7 @@ def read_db_b345(dynamic_factor, driver, URI, AUTH):
         
         
     return df_query_result_b5_final_material, df_query_result_b5_final_waste, df_query_result_b5_dynamic_ratio, df_query_result_b5_energysource_amount, df_query_result_b4_final_material, df_query_result_b4_final_waste, df_query_result_b4_dynamic_ratio, df_query_result_b4_energysource_amount, medium2low, medium_ratio_static, df_query_result_b3_final_material, df_query_result_b3_final_waste, df_query_result_b3_dynamic_ratio, df_query_result_b3_energysource_amount, high2medium, high_ratio_static, df_query_result_b5_final_heat, df_query_result_b4_final_heat, df_query_result_b3_final_heat, df_query_result_b5_final_power, df_query_result_b4_final_power, df_query_result_b3_final_power
-    
-    df_query_result_b1:list[Any] =[]
+
 #%%
 ##############################################################################################################################################################
 #Part 2: Dynamic calculation functions
@@ -1422,14 +1415,12 @@ def prepare_df_b7(import_path: str, years_param: int):
 
     #First import the calculation indicators
     df_dynamicfactor_b7_dagwp_co2 = pd.read_csv(import_path+"DAGWP/AGWP_co2_dynamic.csv").iloc[:, 1:]
-    #df_dynamicfactor_b7_dagwp_ch4 = pd.read_csv(import_path+"DAGWP/AGWP_ch4_dynamic.csv").iloc[:, 1:]
     df_dynamicfactor_b7_dagwp_ch4_bio = pd.read_csv(import_path+"DAGWP/AGWP_ch4_dynamic_bio.csv").iloc[:, 1:]
     df_dynamicfactor_b7_dagwp_ch4_fossil = pd.read_csv(import_path+"DAGWP/AGWP_ch4_dynamic_fossil.csv").iloc[:, 1:]
     df_dynamicfactor_b7_dagwp_n2o = pd.read_csv(import_path+"DAGWP/AGWP_n2o_dynamic.csv").iloc[:, 1:]
     df_dynamicfactor_b7_dagwp_halogen = pd.read_csv(import_path+"DAGWP/AGWP_halogen_dynamic.csv").iloc[:, 1:]
 
     df_dynamicfactor_b7_dagtp_co2 = pd.read_csv(import_path+"DAGTP/AGTP_co2_dynamic.csv").iloc[:, 1:]
-    #df_dynamicfactor_b7_dagtp_ch4 = pd.read_csv(import_path+"DAGTP/AGTP_ch4_dynamic.csv").iloc[:, 1:]
     df_dynamicfactor_b7_dagtp_ch4_bio = pd.read_csv(import_path+"DAGTP/AGTP_ch4_dynamic_bio.csv").iloc[:, 1:]
     df_dynamicfactor_b7_dagtp_ch4_fossil = pd.read_csv(import_path+"DAGTP/AGTP_ch4_dynamic_fossil.csv").iloc[:, 1:]
     df_dynamicfactor_b7_dagtp_n2o = pd.read_csv(import_path+"DAGTP/AGTP_n2o_dynamic.csv").iloc[:, 1:]
@@ -1437,13 +1428,11 @@ def prepare_df_b7(import_path: str, years_param: int):
 
     #non-cumulative version
     df_dynamicfactor_b7_dagwp_co2_noncumulative = pd.read_csv(import_path+"DAGWP/AGWP_co2_dynamic_noncumulative.csv").iloc[:, 1:]
-    #df_dynamicfactor_b7_dagwp_ch4_noncumulative = pd.read_csv(import_path+"DAGWP/AGWP_ch4_dynamic_noncumulative.csv").iloc[:, 1:]
     df_dynamicfactor_b7_dagwp_ch4_bio_noncumulative = pd.read_csv(import_path+"DAGWP/AGWP_ch4_dynamic_bio_noncumulative.csv").iloc[:, 1:]
     df_dynamicfactor_b7_dagwp_ch4_fossil_noncumulative = pd.read_csv(import_path+"DAGWP/AGWP_ch4_dynamic_fossil_noncumulative.csv").iloc[:, 1:]
     df_dynamicfactor_b7_dagwp_n2o_noncumulative = pd.read_csv(import_path+"DAGWP/AGWP_n2o_dynamic_noncumulative.csv").iloc[:, 1:]
     df_dynamicfactor_b7_dagwp_halogen_noncumulative = pd.read_csv(import_path+"DAGWP/AGWP_halogen_dynamic_noncumulative.csv").iloc[:, 1:]
-    
-    # NOTE: 这里统一使用 years_param（不要依赖 run_dlca_pipeline 之后才会设置的全局 years）
+
     indicators = {
         'co2': {
             'cumulative': {
@@ -1574,18 +1563,12 @@ def create_element_processor(indicators, halogen_indicators, cumulative):
     return process_element_optimized
 
 def init_b7_resources(import_path: str | None = None, years_param: int | None = None, cumulative_param: str | None = None):
-    """Initialize B7 CSV tables + element processor.
+    """Initialize B7 CSV tables + element processor."""
 
-    这一步必须在 years/cumulative 已经确定之后再做（也就是 run_dlca_pipeline 里）。
-    否则模块导入时就会因为变量未定义/相对路径错误而报错。
-    """
-
-    # 延迟设置默认值（避免 import 时依赖外部 cwd）
     if import_path is None:
         import_path = str(B7_INPUT_DIR)
 
     if years_param is None:
-        # 尽量从全局 years 取；没有的话退回 100
         years_param = int(globals().get("years", 100))
 
     if cumulative_param is None:
@@ -4358,13 +4341,7 @@ def dynamic_LCIA_b7_b6_annual_consumption(LCIAindicator, LCIAindicatorvalue, con
         
     
     if "-" not in dynamic_factor:
-        for j in range(len(consumption)):            
-            print(
-                  f"\n[LOOP START]"
-                  f" j={j}"
-                  f" years = [starting_time + i for i in range(rsp)]  # 例如 [2025, 2026, ..., 2124]"
-                  f" consumption={consumption[j]}"
-                 )
+        for j in range(len(consumption)):
             LCIAindicatorvalue_difference = 0
             
             if "B5" in dynamic_factor or "power-2024" in dynamic_factor: 
@@ -4879,20 +4856,15 @@ def run_dlca_pipeline(
     LCIAindicator_dynamic_param="AGWP",
     dynamic_scenario_param="Carbon Neutral",
 ):
-    # 把 API 传进来的参数同步到模块级全局变量，
-    # 这样老的 read_db_* / static_LCIA_* / dynamic_LCIA_* 还能继续用这些全局名。
     global buildingage,geography, dynamic_factor, phase_A4, phase_C, phase_B6, static_comparison, cumulative
     global years, LCIAindicator, LCIAindicator_dynamic, dynamic_scenario
-    # 声明 B1/B2/B3/B4/B5 的所有数据变量为全局
     global df_query_result_b1, df_query_result_b1_prep
     global df_query_result_b2_further, df_query_result_b2_influence, df_query_result_b2_base
     
-    # 声明 B3/B4/B5 的数据变量 
     global df_query_result_b5_final_material, df_query_result_b5_final_waste, df_query_result_b5_dynamic_ratio, df_query_result_b5_energysource_amount
     global df_query_result_b4_final_material, df_query_result_b4_final_waste, df_query_result_b4_dynamic_ratio, df_query_result_b4_energysource_amount
     global df_query_result_b3_final_material, df_query_result_b3_final_waste, df_query_result_b3_dynamic_ratio, df_query_result_b3_energysource_amount
     
-    # 声明 B6 相关的变量
     global medium2low, medium_ratio_static, high2medium, high_ratio_static
     global df_query_result_b5_final_heat, df_query_result_b4_final_heat, df_query_result_b3_final_heat
     global df_query_result_b5_final_power, df_query_result_b4_final_power, df_query_result_b3_final_power
@@ -4912,7 +4884,6 @@ def run_dlca_pipeline(
         
         geography = ("CH", "RER", "Europe without Austria", "IAI Area, EU27 & EFTA")
         
-    print(f"[DEBUG] Local Geography explicitly mapped to: {geography}")
 
 
     dynamic_factor = dynamic_factor_param
@@ -5627,7 +5598,7 @@ def run_dlca_pipeline(
 
             except Exception as e:
                 import traceback
-                print(f"[数据拦截错误] 无法生成 all_charts_data: {e}")
+                print(f"Failed to build all_charts_data: {e}")
                 traceback.print_exc()
                 result_building_list_temp["all_charts_data"] = {}
                 result_building_list_temp["yearly_data"] = []
