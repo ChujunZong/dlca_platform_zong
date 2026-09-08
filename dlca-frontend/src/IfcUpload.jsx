@@ -120,7 +120,7 @@ const IfcUpload = () => {
         const newMappings = {};
         for (const mat of fullData.materials) {
           try {
-            const res = await axios.post('http://localhost:5001/api/ifc/suggest_mapping', { material_name: mat.material_name });
+            const res = await axios.post('/api/ifc/suggest_mapping', { material_name: mat.material_name });
             
             newMappings[mat.material_name] = res.data;
           } catch (e) { console.error("Mapping error", e); }
@@ -165,7 +165,7 @@ const IfcUpload = () => {
       };
     });
     try {
-      const res = await axios.post('http://localhost:5001/api/ifc/calculate_carbon', payload);
+      const res = await axios.post('/api/ifc/calculate_carbon', payload);
       if (res.data) setCalcResult(res.data);
     } catch (e) { alert("Calculation failed"); } finally { setIsCalculating(false); }
   };

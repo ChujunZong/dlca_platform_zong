@@ -1,5 +1,5 @@
 import React from 'react';
-import { ArrowUpRight, Twitter, Linkedin, Github } from 'lucide-react';
+import { ArrowUpRight, AtSign, Briefcase, Code2 } from 'lucide-react';
 import './Footer.css';
 
 const Footer = () => {
@@ -39,13 +39,13 @@ const Footer = () => {
           <div className="links-col">
             <span className="col-label">Socials</span>
             <a href="#twitter" className="social-link">
-              <Twitter size={15} /> Twitter
+              <AtSign size={15} /> Twitter
             </a>
             <a href="#linkedin" className="social-link">
-              <Linkedin size={15} /> LinkedIn
+              <Briefcase size={15} /> LinkedIn
             </a>
             <a href="#github" className="social-link">
-              <Github size={15} /> GitHub
+              <Code2 size={15} /> GitHub
             </a>
           </div>
           

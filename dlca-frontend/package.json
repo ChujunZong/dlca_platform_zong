@@ -13,13 +13,18 @@
     "@neo4j/graphql": "^7.2.5",
     "axios": "^1.13.5",
     "cors": "^2.8.5",
+    "echarts": "^6.1.0",
     "express": "^5.1.0",
+    "lucide-react": "^1.33.0",
     "neo4j-driver": "^5.28.2",
     "neovis.js": "github:darylfung96/neovis.js",
     "openai": "^5.23.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "react-force-graph": "^1.48.0"
+    "react-force-graph": "^1.48.0",
+    "react-force-graph-2d": "^1.29.1",
+    "react-router-dom": "^7.18.2",
+    "recharts": "^3.10.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.30.1",

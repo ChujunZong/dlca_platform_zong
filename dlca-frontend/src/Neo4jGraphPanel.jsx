@@ -131,7 +131,7 @@ export default function Neo4jGraphPanel() {
     setManualLoading(true);
     setSelectedNode(null); 
     try {
-      const response = await fetch("http://localhost:5001/api/neo4j/query", {
+      const response = await fetch("/api/neo4j/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cypher: manualCypher })
@@ -163,7 +163,7 @@ export default function Neo4jGraphPanel() {
     ]);
 
     try {
-      const llmRes = await fetch("http://localhost:5001/api/llm/semantic-search", {
+      const llmRes = await fetch("/api/llm/semantic-search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: userText, topK: 50 })
@@ -187,7 +187,7 @@ export default function Neo4jGraphPanel() {
         return newMsg;
       });
 
-      const dbRes = await fetch("http://localhost:5001/api/neo4j/query", {
+      const dbRes = await fetch("/api/neo4j/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cypher: generatedCypher })

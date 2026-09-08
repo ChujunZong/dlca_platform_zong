@@ -479,30 +479,27 @@ const BuildingForm = () => {
                 <div className="form-group" onMouseEnter={() => setHoveredField('buildingType')}>
                   <label>Building Type</label>
                   <div className="radio-grid">
-                    <div className={`radio-card ${formData.building_type === 'Masonry_3' ? 'active' : ''}`} onClick={() => setDirectValue('building_type', 'Masonry_3')}>
-                      <div className="radio-check"><Check size={12} color="white" strokeWidth={3}/></div>
-                      <Building size={24} className="radio-icon" />
-                      <div>
-                        <div className="radio-title">Masonry</div>
-                        <div className="radio-desc">Standard masonry</div>
+                    {[
+                      { id: 'Masonry_1', icon: Building, title: 'Masonry 1', desc: 'Flat roof · wood-alu windows' },
+                      { id: 'Masonry_2', icon: Building, title: 'Masonry 2', desc: 'Pitched roof (PRO)' },
+                      { id: 'Masonry_3', icon: Building, title: 'Masonry 3', desc: 'Flat roof · alu windows' },
+                      { id: 'Masonry_improve1', icon: Home, title: 'Masonry Improve 1', desc: 'Improved walls, floors, roof' },
+                      { id: 'Masonry_improve2', icon: Home, title: 'Masonry Improve 2', desc: 'Improved floors and roof' },
+                      { id: 'Masonry_improve3', icon: Home, title: 'Masonry Improve 3', desc: 'Improved variant 3' },
+                      { id: 'Masonry_improve combined', icon: Home, title: 'Masonry Improve Combined', desc: 'All improvements combined' },
+                      { id: 'Timber_1', icon: Trees, title: 'Timber 1', desc: 'Flat roof · wood-alu windows' },
+                      { id: 'Timber_2', icon: Trees, title: 'Timber 2', desc: 'Pitched roof (PRO)' },
+                      { id: 'Timber_3', icon: Trees, title: 'Timber 3', desc: 'Flat roof · wood windows' },
+                    ].map(bt => (
+                      <div key={bt.id} className={`radio-card ${formData.building_type === bt.id ? 'active' : ''}`} onClick={() => setDirectValue('building_type', bt.id)}>
+                        <div className="radio-check"><Check size={12} color="white" strokeWidth={3}/></div>
+                        <bt.icon size={24} className="radio-icon" />
+                        <div>
+                          <div className="radio-title" style={{ fontSize: '0.85rem' }}>{bt.title}</div>
+                          <div className="radio-desc">{bt.desc}</div>
+                        </div>
                       </div>
-                    </div>
-                    <div className={`radio-card ${formData.building_type === 'Timber_3' ? 'active' : ''}`} onClick={() => setDirectValue('building_type', 'Timber_3')}>
-                      <div className="radio-check"><Check size={12} color="white" strokeWidth={3}/></div>
-                      <Trees size={24} className="radio-icon" />
-                      <div>
-                        <div className="radio-title">Timber</div>
-                        <div className="radio-desc">Wood framework</div>
-                      </div>
-                    </div>
-                    <div className={`radio-card ${formData.building_type === 'Masonry_improve combined' ? 'active' : ''}`} onClick={() => setDirectValue('building_type', 'Masonry_improve combined')}>
-                      <div className="radio-check"><Check size={12} color="white" strokeWidth={3}/></div>
-                      <Home size={24} className="radio-icon" />
-                      <div>
-                        <div className="radio-title" style={{ fontSize: '0.85rem' }}>Masonry Improve Combined</div>
-                        <div className="radio-desc">Advanced structure</div>
-                      </div>
-                    </div>
+                    ))}
                   </div>
                 </div>
 

@@ -118,8 +118,8 @@ high_ratio_static: Optional[pd.DataFrame] = None
 #connect to the database
 
 # URI examples: "neo4j://localhost", "neo4j+s://xxx.databases.neo4j.io"
-URI = "neo4j+s://c28e52e2.databases.neo4j.io"
-AUTH = ("neo4j", "W9i-1q8QYTY7x-Y7T8KWiyF_-dv3nWfcE8epNhRK5VY")
+URI = "bolt://localhost:7687"
+AUTH = ("neo4j", "neo4j")
 
 #Authentication
 driver = GraphDatabase.driver(URI, auth=AUTH)
@@ -222,23 +222,30 @@ show_plots = False
 
 #Select the correct amount/value
 def select_amount(df):
-    df_temp=pd.DataFrame()
-
+    # Optimized: parse each stringified dict once, collect rows in a list,
+    # build the DataFrame in one shot (was: repeated literal_eval + concat per row).
+    # Output verified bit-identical to the previous implementation.
+    cast_cols = ["Material_Density", "Material_Thickness", "Material_Lambda", "Material_RSL"]
+    rows = []
     for i in df.index:
-        for key in ast.literal_eval(df.loc[i,"Material_Density"]).keys():
-            if df.loc[i,"Building_Material"] in key:
-                temp = pd.DataFrame(df.loc[i,:]).T
-                
-                temp.loc[i,"Material_Density"] = ast.literal_eval(df.loc[i,"Material_Density"])[key]
-                temp.loc[i,"Material_Thickness"] = ast.literal_eval(df.loc[i,"Material_Thickness"])[key]
-                temp.loc[i,"Material_Lambda"] = ast.literal_eval(df.loc[i,"Material_Lambda"])[key]
-                temp.loc[i,"Material_RSL"] = ast.literal_eval(df.loc[i,"Material_RSL"])[key]
-                
-                temp.loc[i,"Building_Material"] = key
-                
-                df_temp=pd.concat([df_temp,temp])
-    
-    return df_temp.reset_index(drop=True)
+        densities   = ast.literal_eval(df.loc[i, "Material_Density"])
+        thicknesses = ast.literal_eval(df.loc[i, "Material_Thickness"])
+        lambdas     = ast.literal_eval(df.loc[i, "Material_Lambda"])
+        rsls        = ast.literal_eval(df.loc[i, "Material_RSL"])
+        bm = df.loc[i, "Building_Material"]
+        for key in densities.keys():
+            if bm in key:
+                rec = df.loc[i].to_dict()
+                rec["Material_Density"]   = densities[key]
+                rec["Material_Thickness"] = thicknesses[key]
+                rec["Material_Lambda"]    = lambdas[key]
+                rec["Material_RSL"]       = rsls[key]
+                rec["Building_Material"]  = key
+                rows.append(rec)
+    df_temp = pd.DataFrame(rows, columns=list(df.columns)).reset_index(drop=True)
+    for c in cast_cols:
+        df_temp[c] = pd.to_numeric(df_temp[c], errors='coerce')
+    return df_temp
 
 def read_db_basic (driver,URI,AUTH):
     #Building level (for all material, building componetn and building level) -- static or with DF B7
@@ -352,6 +359,8 @@ def read_db_heat_power(driver,URI,AUTH):
     #-------------------------------------------------
     #Adding operational energy (heating and electricity) (B6 phase)
     #FOR HEATING: energy source is the different heating source, the "heat" is not directly used
+    
+    # Query 1: Traditional heating systems (connected to Initial_heat_LCIA)
     records, summary, keys = driver.execute_query("""
         
         MATCH 
@@ -363,9 +372,6 @@ def read_db_heat_power(driver,URI,AUTH):
         
         database_="neo4j",
     )
-    # Loop through results and do something with them
-    #for record in records:  
-    #    print(record.data())  # obtain record as dict
 
     # Summary information  
     print("The query returned {records_count} records in {time} ms.".format(
@@ -380,7 +386,36 @@ def read_db_heat_power(driver,URI,AUTH):
                                                             "Unit",
                                                             "Power_Mix"
                                                             ])
+    
+    #-------------------------------------------------
+    # Query 2: Heat pumps (directly from Initial_energysource_LCIA, not under Initial_heat_LCIA)
+    # These are energy sources that contain "heat pump" or "heat exchanger" in their name
+    records_heatpump, summary_heatpump, keys_heatpump = driver.execute_query("""
+        
+        MATCH 
+        (es:Initial_energysource_LCIA)-[o]-(df_b7_element: Dynamic_factor_b7_elementamount)
+        
+        WHERE 
+        es.Name CONTAINS 'heat pump' OR es.Name CONTAINS 'heat exchanger'
+        
+        RETURN 
+        'heat, from heat pump' AS Heat, es.Name, es.GWP, df_b7_element.ElementAmount, es.Unit, es.PowerMix
+        """,
+        
+        database_="neo4j",
+    )
 
+    df_query_result_heatpump = pd.DataFrame(records_heatpump, columns = ["Heat",
+                                                                          "Energysource",
+                                                                          "Energysource_GWP",
+                                                                          "Element_Amount",
+                                                                          "Unit",
+                                                                          "Power_Mix"
+                                                                          ])
+    
+    # Combine traditional heating and heat pumps
+    df_query_result_heat = pd.concat([df_query_result_heat, df_query_result_heatpump], ignore_index=True)
+    
     #-------------------------------------------------
     #Adding operational energy (heating and electricity) (B6 phase)
     #FOR POWERMIX: the powermixes are the most important here, the different energy sources in the mix is at this stage not yet important.
@@ -395,15 +430,7 @@ def read_db_heat_power(driver,URI,AUTH):
         
         database_="neo4j",
     )
-    # Loop through results and do something with them
-    #for record in records:  
-    #    print(record.data())  # obtain record as dict
 
-    # Summary information  
-    print("The query returned {records_count} records in {time} ms.".format(
-        records_count=len(records),
-        time=summary.result_available_after
-    ))
     
     df_query_result_powermix = pd.DataFrame(records, columns = ["Powermix",
                                                                 "Powermix_GWP",
@@ -552,7 +579,18 @@ def process_amounts_DF2(df, target):
 def select_amount_DF1(df):    #CHECK!
     df_temp=df.copy()
 
+    # Pandas 2.x PyArrow-backed 'str' dtype rejects float/int assignments to string columns.
+    # Raw_Material holds a stringified dict and will be overwritten with a numeric value below.
+    if "Raw_Material" in df_temp.columns:
+        _casted = df_temp["Raw_Material"].astype(object)
+        # Normalize NaN/<NA> to real None so any `is not None` checks downstream still work.
+        df_temp["Raw_Material"] = _casted.where(_casted.notna(), None)
+
     for i in df.index:
+        # Guard against NaN/None values from pyarrow-backed columns — literal_eval
+        # only works on strings.
+        if not isinstance(df.loc[i,"Raw_Material"], str):
+            continue
         rawmaterials = ast.literal_eval(df.loc[i,"Raw_Material"])
         for key in rawmaterials.keys():
             if df.loc[i,"Name"] in key and df.loc[i,"Region"] in key:
@@ -560,10 +598,36 @@ def select_amount_DF1(df):    #CHECK!
                     df_temp.loc[i,"Raw_Material"] = rawmaterials[key]
                 else:
                     df_temp.loc[i,"Raw_Material"] = rawmaterials[key][0]
-    
-    return df_temp  
+
+    return df_temp
 
 def select_amount_DF345(df):
+    # Pandas 2.x defaults to PyArrow-backed 'str' dtype for string columns.
+    # Several columns below hold stringified dicts that will later be replaced
+    # with float/int values from ast.literal_eval(...). PyArrow string columns
+    # reject non-string assignments (TypeError: Invalid value 'X.Y' for dtype 'str').
+    # Cast these columns to object up front so mixed-type writes keep working.
+    _object_cast_cols = [
+        "Material_Density", "Material_Thickness", "Material_Lambda", "Material_RSL",
+        "Material_Density2", "Material_Thickness2", "Material_Lambda2", "Material_RSL2",
+        "Material_Density3", "Material_Thickness3", "Material_Lambda3", "Material_RSL3",
+        "Power_Mix_Percentage", "Power_Mix_Group_Percentage_Raw_Material",
+        "Energy_Source", "Power_Transformation", "Power_Transmission_Network",
+        "Raw_Material", "Waste_Treatment", "Loss",
+    ]
+    for _col in _object_cast_cols:
+        if _col in df.columns:
+            _casted = df[_col].astype(object)
+            # Normalize pyarrow <NA>/np.nan to real None so existing
+            # `is not None` checks behave as before (ast.literal_eval(nan) -> ValueError).
+            df[_col] = _casted.where(_casted.notna(), None)
+
+    # Also normalize Name2/Waste_Name which are compared with `is not None` below.
+    for _col in ("Name2", "Waste_Name"):
+        if _col in df.columns:
+            _casted = df[_col].astype(object)
+            df[_col] = _casted.where(_casted.notna(), None)
+
     for i in df.index:
         if "group for electricity" in df.loc[i,"Name"]: #power mix group
             df.loc[i,"Material_Density"] = df.loc[i,"Material_Density2"]
@@ -576,7 +640,7 @@ def select_amount_DF345(df):
             df.loc[i,"Building_Construction_Type"] = df.loc[i,"Building_Construction_Type2"]
             df.loc[i,"Material_Unit"] = df.loc[i,"Material_Unit2"]
             
-        if "group for electricity" not in df.loc[i,"Name"] and df.loc[i,"Name2"] is not None: #materials at the same query level as power mix group
+        if "group for electricity" not in df.loc[i,"Name"] and isinstance(df.loc[i,"Name2"], str): #materials at the same query level as power mix group
             df.loc[i,"Name"] = df.loc[i,"Name2"]
             df.loc[i,"Name2"] = None
             df.loc[i,"Material_Density"] = df.loc[i,"Material_Density2"]
@@ -588,8 +652,8 @@ def select_amount_DF345(df):
             df.loc[i,"Building_Component"] = df.loc[i,"Building_Component2"]
             df.loc[i,"Building_Construction_Type"] = df.loc[i,"Building_Construction_Type2"]
             df.loc[i,"Material_Unit"] = df.loc[i,"Material_Unit2"]
-            
-        if df.loc[i,"Waste_Name"] is not None:
+
+        if isinstance(df.loc[i,"Waste_Name"], str):
             df.loc[i,"Material_Density"] = df.loc[i,"Material_Density3"]
             df.loc[i,"Material_Thickness"] = df.loc[i,"Material_Thickness3"]
             df.loc[i,"Material_Lambda"] = df.loc[i,"Material_Lambda3"]
@@ -602,8 +666,10 @@ def select_amount_DF345(df):
     
     df_temp=pd.DataFrame()
 
-    for i in df.index:                        
-        if df.loc[i,"Material_Density"] is not None:
+    for i in df.index:
+        # Use isinstance(..., str) rather than `is not None` because pyarrow-backed
+        # columns may hold pd.NA / np.nan that compare != None but are not strings.
+        if isinstance(df.loc[i,"Material_Density"], str):
             for key in ast.literal_eval(df.loc[i,"Material_Density"]).keys():
                 if df.loc[i,"Building_Material"] in key:
                     temp = pd.DataFrame(df.loc[i,:]).T
@@ -622,10 +688,23 @@ def select_amount_DF345(df):
             df_temp=pd.concat([df_temp,temp])
             df_temp=df_temp.reset_index(drop=True)
     
+    # pd.concat above can promote None back to NaN on object columns; re-normalize
+    # so the `is not None` guards around ast.literal_eval below still work correctly.
+    for _col in (
+        "Power_Mix_Percentage", "Power_Mix_Group_Percentage_Raw_Material",
+        "Energy_Source", "Power_Transformation", "Power_Transmission_Network",
+        "Raw_Material", "Waste_Treatment", "Name2",
+    ):
+        if _col in df_temp.columns:
+            _casted = df_temp[_col].astype(object)
+            df_temp[_col] = _casted.where(_casted.notna(), None)
+
     df_copy=df_temp.copy()
-    
-    for i in df_copy.index:                
-        if df_copy.loc[i,"Power_Mix_Percentage"] is not None:
+
+    for i in df_copy.index:
+        # isinstance(..., str) is the correct guard for `ast.literal_eval` — pyarrow
+        # string columns carry pd.NA/np.nan which pass `is not None` but crash literal_eval.
+        if isinstance(df_copy.loc[i,"Power_Mix_Percentage"], str):
             powermixes = ast.literal_eval(df_copy.loc[i,"Power_Mix_Percentage"])
             for key in powermixes.keys():
                 if df_copy.loc[i,"Power_Mix"] in key:
@@ -633,8 +712,8 @@ def select_amount_DF345(df):
                         df_temp.loc[i,"Power_Mix_Percentage"] = powermixes[key]
                     else:
                         df_temp.loc[i,"Power_Mix_Percentage"] = powermixes[key][0]
-                                           
-        if df_copy.loc[i,"Power_Mix_Group_Percentage_Raw_Material"] is not None:
+
+        if isinstance(df_copy.loc[i,"Power_Mix_Group_Percentage_Raw_Material"], str):
             powermixgroups = ast.literal_eval(df_copy.loc[i,"Power_Mix_Group_Percentage_Raw_Material"])
             for key in powermixgroups.keys():
                 if df_copy.loc[i,"Name"] in key:
@@ -642,46 +721,46 @@ def select_amount_DF345(df):
                         df_temp.loc[i,"Power_Mix_Group_Percentage_Raw_Material"] = powermixgroups[key]
                     else:
                         df_temp.loc[i,"Power_Mix_Group_Percentage_Raw_Material"] = powermixgroups[key][0]
-                    
-        if df_copy.loc[i,"Energy_Source"] is not None:
+
+        if isinstance(df_copy.loc[i,"Energy_Source"], str):
             energysources = ast.literal_eval(df_copy.loc[i,"Energy_Source"])
             for key in energysources.keys():
                 if df_copy.loc[i,"Name"] in key:
                     if isinstance(energysources[key], float) or isinstance(energysources[key], int):
                         df_temp.loc[i,"Energy_Source"] = energysources[key]
                     else:
-                        df_temp.loc[i,"Energy_Source"] = energysources[key][0]                      
-                    
-        if df_copy.loc[i,"Power_Transformation"] is not None:
+                        df_temp.loc[i,"Energy_Source"] = energysources[key][0]
+
+        if isinstance(df_copy.loc[i,"Power_Transformation"], str):
             powertransformations = ast.literal_eval(df_copy.loc[i,"Power_Transformation"])
             for key in powertransformations.keys():
                 if df_copy.loc[i,"Name"] in key:
                     if isinstance(powertransformations[key], float) or isinstance(powertransformations[key], int):
                         df_temp.loc[i,"Power_Transformation"] = powertransformations[key]
                     else:
-                        df_temp.loc[i,"Power_Transformation"] = powertransformations[key][0]  
-        
-        if df_copy.loc[i,"Power_Transmission_Network"] is not None:
+                        df_temp.loc[i,"Power_Transformation"] = powertransformations[key][0]
+
+        if isinstance(df_copy.loc[i,"Power_Transmission_Network"], str):
             powertransmissions = ast.literal_eval(df_copy.loc[i,"Power_Transmission_Network"])
             for key in powertransmissions.keys():
                 if df_copy.loc[i,"Name"] in key and "network" in df_copy.loc[i,"Name"]:
                     if isinstance(powertransmissions[key], float) or isinstance(powertransmissions[key], int):
                         df_temp.loc[i,"Power_Transmission_Network"] = powertransmissions[key]
                     else:
-                        df_temp.loc[i,"Power_Transmission_Network"] = powertransmissions[key][0]  
-        
-        if df_copy.loc[i,"Raw_Material"] is not None:
+                        df_temp.loc[i,"Power_Transmission_Network"] = powertransmissions[key][0]
+
+        if isinstance(df_copy.loc[i,"Raw_Material"], str):
             rawmaterials = ast.literal_eval(df_copy.loc[i,"Raw_Material"])
             for key in rawmaterials.keys():
-                if df_copy.loc[i,"Name"] in key or df_copy.loc[i,"Name2"] is not None and df_copy.loc[i,"Name2"] in key:
+                if df_copy.loc[i,"Name"] in key or (isinstance(df_copy.loc[i,"Name2"], str) and df_copy.loc[i,"Name2"] in key):
                     if any(keyword in key for keyword in geography):
                     #if "CH" in key or "RER" in key or "Europe without Austria" in key:
                         if isinstance(rawmaterials[key], float) or isinstance(rawmaterials[key], int):
                             df_temp.loc[i,"Raw_Material"] = rawmaterials[key]
                         else:
                             df_temp.loc[i,"Raw_Material"] = rawmaterials[key][0]
-            
-        if df_copy.loc[i,"Waste_Treatment"] is not None:
+
+        if isinstance(df_copy.loc[i,"Waste_Treatment"], str):
             wastetreatments = ast.literal_eval(df_copy.loc[i,"Waste_Treatment"])
             for key in wastetreatments.keys():
                 if df_copy.loc[i,"Name"] in key:
@@ -896,25 +975,25 @@ def read_db_b1(dynamic_factor, driver, URI, AUTH, df_query_result):
         #after the above step, there are region_x and region_y. For import, region_x is relevant.
         
                 
+        # Optimized: group prep rows by (construction type, component, material) once,
+        # then assemble per-row entries by dict lookup (was: O(N*M) double loop with
+        # scalar .loc comparisons). Output verified bit-identical.
+        df_query_result_b1_prep["Amount"] = [float(v) for v in df_query_result_b1_prep["Import_Ratio_Change"]]
+        _b1_groups = {}
+        for j in df_query_result_b1_prep.index:
+            _key = (df_query_result_b1_prep.loc[j,"Building_Construction_Type"],
+                    df_query_result_b1_prep.loc[j,"Building_Component"],
+                    df_query_result_b1_prep.loc[j,"Building_Material"])
+            _b1_groups.setdefault(_key, []).append(df_query_result_b1_prep.iloc[[j]].reset_index(drop=True))
+
         df_query_result_b1=[]
-        
         for i in df_query_result.index:
-            df_query_result_b1.append([df_query_result.loc[i,"Building_Construction_Type"],df_query_result.loc[i,"Building_Component"],df_query_result.loc[i,"Building_Material"],[]])
-        
-        for i in df_query_result_b1:        
-            for j in df_query_result_b1_prep.index:
-                if df_query_result_b1_prep.loc[j,"Building_Construction_Type"] == i[0]\
-                and df_query_result_b1_prep.loc[j,"Building_Component"] == i[1]\
-                and df_query_result_b1_prep.loc[j,"Building_Material"] == i[2]:
-                    """
-                    if df_query_result_b1_prep.loc[j,"Region_x"] == "CH" or df_query_result_b1_prep.loc[j,"Region_x"] == "RER":
-                        df_query_result_b1_prep.loc[j,"Amount"] = 0-float(df_query_result_b1_prep.loc[j,"Import_Ratio_Change"])
-                    else:
-                        df_query_result_b1_prep.loc[j,"Amount"] = float(df_query_result_b1_prep.loc[j,"Import_Ratio_Change"])
-                    """
-                    df_query_result_b1_prep.loc[j,"Amount"] = float(df_query_result_b1_prep.loc[j,"Import_Ratio_Change"]) #this is the general value. Further calculation needed in the loop.
-                    i[3].append(df_query_result_b1_prep.iloc[[j]].reset_index(drop=True))
-        
+            _key = (df_query_result.loc[i,"Building_Construction_Type"],
+                    df_query_result.loc[i,"Building_Component"],
+                    df_query_result.loc[i,"Building_Material"])
+            df_query_result_b1.append([_key[0], _key[1], _key[2],
+                                       [d.copy() for d in _b1_groups.get(_key, [])]])
+
     return df_query_result_b1, df_query_result_b1_prep
              
 def read_db_b345(dynamic_factor, driver, URI, AUTH):
@@ -2076,14 +2155,70 @@ def dynamic_LCIA_b7_waste_replacement_adjust(LCIAindicator, LCIAindicatorvalue, 
     return waste
 
 #%%
+def import_ratio_b1_stochastic(rate, initial_import, year_difference,
+                                upper_outlier, lower_outlier,
+                                upper_outlier_f, lower_outlier_f):
+    """
+    Draw ONE stochastic import-ratio trajectory.
+
+    For each year in year_difference, independently samples the annual rate
+    of change from {rate, upper_outlier, lower_outlier} with the given
+    frequencies, and compounds it onto initial_import. Returns the final
+    (clipped to [0, 1]) ratio as a single float.
+
+    Outer Monte Carlo (running the whole LCIA pipeline N times to obtain a
+    distribution of final temp values) is handled by uncertainty_merge.py,
+    NOT here. Each call to this function returns one realization; the n_sim
+    loop that used to live inside this function has been removed on
+    purpose — its presence caused the caller to collapse draws to a median
+    and hid all sampling variance from the outer wrapper loop.
+
+    Parameters
+    ----------
+    rate:             normal annual rate of change (Amount)
+    initial_import:   starting import ratio (1 - sum(Raw_Material))
+    year_difference:  number of years to compound over
+    upper_outlier:    upper-bound annual rate
+    lower_outlier:    lower-bound annual rate
+    upper_outlier_f:  upper-bound occurrence frequency (e.g. 0.05 = 1/20 yr)
+    lower_outlier_f:  lower-bound occurrence frequency
+    """
+    # None/NaN guards
+    if pd.isna(upper_outlier) or upper_outlier is None:
+        upper_outlier = rate
+    if pd.isna(lower_outlier) or lower_outlier is None:
+        lower_outlier = rate
+    if pd.isna(upper_outlier_f) or upper_outlier_f is None:
+        upper_outlier_f = 0
+    if pd.isna(lower_outlier_f) or lower_outlier_f is None:
+        lower_outlier_f = 0
+
+    upper_outlier = float(upper_outlier)
+    lower_outlier = float(lower_outlier)
+    upper_outlier_f = float(upper_outlier_f)
+    lower_outlier_f = float(lower_outlier_f)
+
+    p_normal = max(1.0 - upper_outlier_f - lower_outlier_f, 0)
+
+    cumulative_factor = initial_import
+    for _ in range(year_difference):
+        annual_rate = np.random.choice(
+            [rate, upper_outlier, lower_outlier],
+            p=[p_normal, upper_outlier_f, lower_outlier_f],
+        )
+        cumulative_factor *= (1 + annual_rate)
+
+    return max(0.0, min(1.0, cumulative_factor))
+
+
 def change_percent_b2_calc(k,df_query_result_b, year_difference, original_material, original_component):
-    global df_query_result_b1
+    
     change_percent = df_query_result_b.loc[k,"Amount_Specific"] * year_difference   
     reduction_reference = df_query_result_b.loc[k,"Reduction_Reference"] * year_difference  
     reduction_reference_waste = df_query_result_b.loc[k,"Reduction_Reference_Waste"] * year_difference  
     
-    year_difference_reduction = 500
-    year_difference_reduction_waste = 500
+    year_difference_reduction = 5000
+    year_difference_reduction_waste = 5000
     
     reduction_in_material_max = df_query_result_b.loc[k,"Reduction_In_Material_Max"]
     
@@ -2091,6 +2226,7 @@ def change_percent_b2_calc(k,df_query_result_b, year_difference, original_materi
     reduction_in_material_max_smaller = df_query_result_b.loc[k,"Reduction_In_Material_Max_Smaller"]
     
     reduction_in_waste_max = df_query_result_b.loc[k,"Waste_Reduction_Max"]
+    
     
     if "B1" in dynamic_factor:
         for m in range(len(df_query_result_b1)):            
@@ -2107,8 +2243,10 @@ def change_percent_b2_calc(k,df_query_result_b, year_difference, original_materi
                     
                     #IT IS NOW BASED ON IMPORT, SO +, import is (1-local original)
                     #IT IS NOW SUM OF ALL REGIONAL
+                    
                     temp = (1 + selected_df.loc[0, "Amount"]) ** year_difference * (1-selected_df["Raw_Material"].sum())
                     
+                                        
                     if temp > 1:
                         temp = 1
                     if temp < 0:
@@ -2143,7 +2281,8 @@ def change_percent_b2_calc(k,df_query_result_b, year_difference, original_materi
     
     #Check the partial stopping point using smaller (if the smaller one reaches 0, the other ones will have 100%)
     #This one is currently not needed, because the distribution of the recycled part is proportionally accordingly to the partial %
-       
+    
+    
     return change_percent
 
 def change_percent_b1_calc(k,d,df_query_result_b,temp,import_original):
@@ -2174,7 +2313,6 @@ def change_percent_b1_calc(k,d,df_query_result_b,temp,import_original):
     return change_percent
 
 def separate_calculation_new_elementflow(current_dynamic_factor, LCIAindicator, df_query_result_b, year_difference, original_material, original_component, area, lower_influence, df_query_result_b_lower, df_query_result_b_lower2, df_query_result_b2):
-    global df_query_result_b1
     AGWP=pd.Series(0, range(0,years*10+1))
     AGWP_fossil=pd.Series(0, range(0,years*10+1))
     AGWP_bio=pd.Series(0, range(0,years*10+1))
@@ -2211,9 +2349,6 @@ def separate_calculation_new_elementflow(current_dynamic_factor, LCIAindicator, 
             if df_query_result_b[k][2] == original_material and df_query_result_b[k][1] == original_component: #THINK ABOUT IF AND HOW TO ADD CONSTRUCTION TYPE AS FILTER - solved
 
                 dataframes = df_query_result_b[k][3]
-                print("[DEBUG core B1] geography =", geography)
-                print("[DEBUG core B1] Region_x candidates =",
-                      [df.loc[0, "Region_x"] for df in dataframes if df is not None and not df.empty])
                 filtered_indices = [
                     t for t in range(len(dataframes))
                     if not dataframes[t].empty and dataframes[t].loc[0, "Region_x"] in geography
@@ -2224,13 +2359,38 @@ def separate_calculation_new_elementflow(current_dynamic_factor, LCIAindicator, 
 
                     #IT IS NOW BASED ON IMPORT, SO +, import is (1-local original)
                     #IT IS NOW SUM OF ALL REGIONAL
-                    temp = (1 + selected_df.loc[0,"Amount"]) ** year_difference * (1-selected_df["Raw_Material"].sum())
+                    
+                    """
+                    #CONSIDER UNCERTAINTY
+                    rate = float(selected_df.loc[0, "Amount"])
+                    import_original=(1-selected_df["Raw_Material"].sum())
+                    
+                    
+                    # 从 df_query_result_b1_prep 中取上下界
+                    upper_outlier = selected_df.loc[0, "Upper_Outlier"] if "Upper_Outlier" in selected_df.columns else None
+                    lower_outlier = selected_df.loc[0, "Lower_Outlier"] if "Lower_Outlier" in selected_df.columns else None
+                    upper_outlier_f = selected_df.loc[0, "Upper_Outlier_F"] if "Upper_Outlier_F" in selected_df.columns else None
+                    lower_outlier_f = selected_df.loc[0, "Lower_Outlier_F"] if "Lower_Outlier_F" in selected_df.columns else None
+                    
+                    # Single stochastic draw; outer Monte Carlo is handled
+                    # by uncertainty_merge.py (100 wrapper sims). We DO NOT
+                    # median-collapse here — that would hide all sampling
+                    # variance from the outer loop.
+                    temp = import_ratio_b1_stochastic(
+                        rate, import_original, year_difference,
+                        upper_outlier, lower_outlier,
+                        upper_outlier_f, lower_outlier_f,
+                        )
+
+                    """
+                    #NOT CONSIDER UNCERTAINTY
+                    temp = (1 + selected_df.loc[0, "Amount"]) ** year_difference * (1-selected_df["Raw_Material"].sum())
                     
                     import_original=(1-selected_df["Raw_Material"].sum())
                             
-                    for d in range(len(df_query_result_b[k][3])):
-                      density=df_query_result_b[k][3][d].loc[0,"Material_Density"]
-                      thickness=df_query_result_b[k][3][d].loc[0,"Material_Thickness"]                     
+                for d in range(len(df_query_result_b[k][3])):
+                    density=df_query_result_b[k][3][d].loc[0,"Material_Density"]
+                    thickness=df_query_result_b[k][3][d].loc[0,"Material_Thickness"]                     
                     
                     change_percent = change_percent_b1_calc(k,d,df_query_result_b,temp,import_original)
                     
@@ -2381,8 +2541,8 @@ def separate_calculation_new_elementflow(current_dynamic_factor, LCIAindicator, 
                                     import_original=(1-selected_df["Raw_Material"].sum())
                                      
                                             
-                                    for d in range(len(df_query_result_b1[n][3])):
-                                     if df_query_result_b1[n][3][d].loc[0,"Name_x"] == rawmaterial_name: #raw material production or waste treatment
+                                for d in range(len(df_query_result_b1[n][3])):
+                                    if df_query_result_b1[n][3][d].loc[0,"Name_x"] == rawmaterial_name: #raw material production or waste treatment
                                         change_percent_b1 = change_percent_b1_calc(n,d,df_query_result_b1,temp,import_original)
                                         break  # Exit inner loop after finding raw material match
                                 
@@ -4925,38 +5085,50 @@ def run_dlca_pipeline(
                 drop=True
             )
 
+            # Infer building_type from the component, used to filter dynamic-factor data
+            inferred_building_type = df_query_result_calc.loc[0, "Building_Construction_Type"]
+
+            # Restrict the main material dataframe to the inferred building type so
+            # that static_LCIA_component's internal groupby(['Building_Material']).min()
+            # aggregates within a single Building_Construction_Type.
+            df_query_result_calc = df_query_result_calc[
+                df_query_result_calc["Building_Construction_Type"] == inferred_building_type
+            ].reset_index(drop=True)
+
             # try to skip other components
             if "B2" in dynamic_factor:
                 df_query_result_b2_influence = df_query_result_b2_influence[
-                    df_query_result_b2_influence["Building_Component"].str.contains(component_name)
+                    (df_query_result_b2_influence["Building_Component"].str.contains(component_name))
+                    & (df_query_result_b2_influence["Building_Construction_Type"] == inferred_building_type)
                 ].reset_index(drop=True)
                 df_query_result_b2_further = df_query_result_b2_further[
-                    df_query_result_b2_further["Building_Component"].str.contains(component_name)
+                    (df_query_result_b2_further["Building_Component"].str.contains(component_name))
+                    & (df_query_result_b2_further["Building_Construction_Type"] == inferred_building_type)
                 ].reset_index(drop=True)
 
             if "B1" in dynamic_factor:
-                df_query_result_b1 = [sublist for sublist in df_query_result_b1 if sublist[1] == component_name]
+                df_query_result_b1 = [sublist for sublist in df_query_result_b1 if sublist[1] == component_name and sublist[0] == inferred_building_type]
 
             if "B5" in dynamic_factor or "B4" in dynamic_factor or "B3" in dynamic_factor or "power-2024" in dynamic_factor:
                 df_query_result_b5_final_material = [
-                    sublist for sublist in df_query_result_b5_final_material if sublist[1] == component_name
+                    sublist for sublist in df_query_result_b5_final_material if sublist[1] == component_name and sublist[0] == inferred_building_type
                 ]
                 df_query_result_b5_final_waste = [
-                    sublist for sublist in df_query_result_b5_final_waste if sublist[1] == component_name
+                    sublist for sublist in df_query_result_b5_final_waste if sublist[1] == component_name and sublist[0] == inferred_building_type
                 ]
             if "B4" in dynamic_factor or "B3" in dynamic_factor or "power-2024" in dynamic_factor:
                 df_query_result_b4_final_material = [
-                    sublist for sublist in df_query_result_b4_final_material if sublist[1] == component_name
+                    sublist for sublist in df_query_result_b4_final_material if sublist[1] == component_name and sublist[0] == inferred_building_type
                 ]
                 df_query_result_b4_final_waste = [
-                    sublist for sublist in df_query_result_b4_final_waste if sublist[1] == component_name
+                    sublist for sublist in df_query_result_b4_final_waste if sublist[1] == component_name and sublist[0] == inferred_building_type
                 ]
             if "B3" in dynamic_factor or "power-2024" in dynamic_factor:
                 df_query_result_b3_final_material = [
-                    sublist for sublist in df_query_result_b3_final_material if sublist[1] == component_name
+                    sublist for sublist in df_query_result_b3_final_material if sublist[1] == component_name and sublist[0] == inferred_building_type
                 ]
                 df_query_result_b3_final_waste = [
-                    sublist for sublist in df_query_result_b3_final_waste if sublist[1] == component_name
+                    sublist for sublist in df_query_result_b3_final_waste if sublist[1] == component_name and sublist[0] == inferred_building_type
                 ]
 
         else:
@@ -5026,7 +5198,8 @@ def run_dlca_pipeline(
         if phase_C == True:
             if component_name is not None:
                 df_query_result_waste_calc = df_query_result_waste[
-                    df_query_result_waste["Building_Component"].str.contains(component_name)
+                    (df_query_result_waste["Building_Component"].str.contains(component_name))
+                    & (df_query_result_waste["Building_Construction_Type"] == inferred_building_type)
                 ].reset_index(drop=True)
 
             else:

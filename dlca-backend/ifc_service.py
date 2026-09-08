@@ -195,16 +195,35 @@ def suggest_mapping():
 
     return jsonify({"material_name": material_name, "epd_id": suggested_id}), 200
 
+_CODE_TO_BUILDING = None
+def _code_to_building():
+    """Map each component code to a building type that actually contains it (queried from the DB once)."""
+    global _CODE_TO_BUILDING
+    if _CODE_TO_BUILDING is None:
+        mapping = {}
+        try:
+            from neo4j_service import driver as _drv
+            with _drv.session() as s:
+                for rec in s.run("MATCH (b:Building)--(bc:Building_component) RETURN bc.Name AS c, collect(b.Name) AS bs"):
+                    mapping[rec["c"]] = sorted(rec["bs"])[0]
+        except Exception as e:
+            print("[ifc] building-map query failed, using fallback:", e)
+            mapping = {"PRO_h_1": "Masonry_2", "WINwood_1": "Timber_3"}
+        _CODE_TO_BUILDING = mapping
+    return _CODE_TO_BUILDING
+
+
 @bp.post("/calculate_carbon")
 def calculate_carbon():
     if dlca_core is None: return jsonify({"error": "dlca_core not found"}), 500
-    
+
     try:
-        building_id = "IFC_" + str(uuid.uuid4())[:6]
-        
+        base_id = "IFC_" + str(uuid.uuid4())[:6]
+        code_map = _code_to_building()
+
         aggregated_components = {code: 0.0 for code in VALID_CODES}
         total_floor_area = 0.0
-        
+
         for item in request.json:
             raw_id = item.get("epd_id", "EWmas_1")
             std_code = next(
@@ -214,128 +233,101 @@ def calculate_carbon():
             area = float(item.get('quantity', 0))
             aggregated_components[std_code] += area
             total_floor_area += area
-            
-        comp_names = [c for c, a in aggregated_components.items() if a > 0]
-        comp_areas = [a for a in aggregated_components.values() if a > 0]
 
-        building_input = [{
-            "building_id": building_id,
-            "building_type": "Masonry_improve combined",
-            "building_components": comp_names,         
-            "building_components_area": comp_areas,    
-            "consumption_power": np.zeros(100),
-            "consumption_heat": np.full(100, 35.13 * total_floor_area),
-            "power_system": "electricity, low voltage",
-            "heating_system": "heat production, wood pellet, at furnace 300kW",
-            "total_floor_area": total_floor_area
-        }]
+        active = [(c, a) for c, a in aggregated_components.items() if a > 0]
+        skipped = [c for c, a in active if c not in code_map]
+        active = [(c, a) for c, a in active if c in code_map]
 
-        
-        dlca_core.run_dlca_pipeline(
-            building_list=building_input, buildingage_param="nb", geography_param=("CH", "RER", "Europe without Austria", "IAI Area", "GLO", "RoW"), 
-            dynamic_factor_param=["B1", "B2"], phase_A4_param=True, phase_B6_param=True, phase_C_param=True, 
-            static_comparison_param=False, cumulative_param="cumulative", years_param=100,
-            LCIAindicator_param="GWP", LCIAindicator_dynamic_param="AGWP", dynamic_scenario_param="Carbon Neutral"
-        )
-        
-        time.sleep(2.5) 
-        
-        
+        # Per-component calculation: each component runs with the building type
+        # that actually contains it in the database. Component material data is
+        # independent of the building type, so results are exact per component.
+        # Operational energy (B6) is excluded: an IFC material take-off defines
+        # embodied + replacement + end-of-life scope, not operation.
+        run_ids = []
+        for code, area in active:
+            bid = f"{base_id}-{code}"
+            building_input = [{
+                "building_id": bid,
+                "building_type": code_map[code],
+                "building_components": [code],
+                "building_components_area": [area],
+                "consumption_power": np.zeros(100),
+                "consumption_heat": np.zeros(100),
+                "power_system": "electricity, low voltage",
+                "heating_system": "heat production, wood pellet, at furnace 300kW",
+                "total_floor_area": total_floor_area
+            }]
+            print(f"[ifc] computing {code} ({area:.1f} m2) as {code_map[code]}")
+            dlca_core.run_dlca_pipeline(
+                building_list=building_input, buildingage_param="nb",
+                geography_param=("EUROPE_GROUP",),
+                dynamic_factor_param=["B1", "B2"], phase_A4_param=True,
+                phase_B6_param=False, phase_C_param=True,
+                static_comparison_param=False, cumulative_param="cumulative", years_param=100,
+                LCIAindicator_param="GWP", LCIAindicator_dynamic_param="AGWP",
+                dynamic_scenario_param="Carbon Neutral"
+            )
+            run_ids.append((code, bid))
+
+        # Collect results per component
         target_dir = PLOTS_OUTPUT_DIR / "with_waste"
-        building_type = "Masonry_improve combined"
-        prefix = f"AGWP_{building_id}_{building_type}_"
-        
-        topics = {}
-        def get_topic(name):
-            if name not in topics:
-                topics[name] = {"name": name, "total_line": [], "sub_lines": {}, "pdf": None}
-            return topics[name]
-
-        total_val = 0.0
-
-        if target_dir.exists():
-            parquet_files = glob.glob(str(target_dir / f"*{building_id}*.parquet"))
-            pdf_files = glob.glob(str(target_dir / f"*{building_id}*.pdf"))
-            
-            
-            for pf in parquet_files:
-                filename = os.path.basename(pf)
+        comp_groups = []
+        for code, bid in run_ids:
+            g = {"name": f"3. Breakdown: {code}", "total_line": [], "sub_lines": {}, "pdf": None}
+            for pf in sorted(glob.glob(str(target_dir / f"*{bid}_*.parquet"))):
+                fn = os.path.basename(pf)
+                if "_subparts" in fn: continue
                 try:
-                    if not filename.startswith(prefix): continue
-                    
                     df = pd.read_parquet(pf)
                     vals = [float(v) for v in df['value'].fillna(0).iloc[::10].tolist()]
-                    
-                    remainder = filename[len(prefix):]
-                    name_part = remainder.split("_cumulative")[0]
-                    phase_label = " (Waste Phase)" if "_waste.parquet" in filename.lower() else ""
-                    
-                    
-                    if "including waste" in name_part:
-                        if name_part == f"{building_type} including waste":
-                            get_topic("1. Total Lifecycle (incl. Waste)")["total_line"] = vals
-                            total_val = vals[-1] if vals else 0.0
-                        else:
-                            sub = name_part.replace(f"{building_type} including waste_", "")
-                            get_topic("1. Total Lifecycle (incl. Waste)")["sub_lines"][sub + phase_label] = vals
-                            
-                    elif name_part == f"{building_type} total":
-                        get_topic("2. Building Components Summary")["total_line"] = vals
-                    elif name_part.startswith(f"{building_type}_"):
-                        sub = name_part.replace(f"{building_type}_", "")
-                        get_topic("2. Building Components Summary")["sub_lines"][sub + phase_label] = vals
-                        
-                    elif name_part.endswith(" total"):
-                        comp = name_part.replace(" total", "")
-                        get_topic(f"3. Breakdown: {comp}")["total_line"] = vals
-                    else:
-                        if "_" in name_part:
-                            comp = name_part.split("_")[0]
-                            sub = name_part[len(comp)+1:]
-                            get_topic(f"3. Breakdown: {comp}")["sub_lines"][sub + phase_label] = vals
-                        else:
-                            get_topic(f"4. Other: {name_part}")["total_line"] = vals
                 except Exception as e:
-                    print(f"Error parsing parquet {filename}: {e}")
+                    print(f"[ifc] parquet read failed {fn}: {e}"); continue
+                if " including waste_Waste_cumulative" in fn:
+                    g["sub_lines"]["waste phase (end-of-life)"] = vals
+                elif " including waste_Without Waste_cumulative" in fn:
+                    g["sub_lines"]["production + replacement phase"] = vals
+                elif " including waste_cumulative" in fn and f"{code} including waste" not in fn:
+                    g["total_line"] = vals                      # building-level total incl. waste
+                elif f"{code} including waste" in fn or " total_cumulative" in fn:
+                    continue                                    # redundant duplicates in a 1-component run
+                else:
+                    # material-level file: split at the LAST occurrence of the component code,
+                    # because the run id itself also contains the code
+                    tail = fn.rsplit(f"_{code}_", 1)
+                    if len(tail) < 2 or tail[1].startswith("cumulative"):
+                        continue                                # component-level duplicate curve
+                    label = tail[1].split("_cumulative")[0]
+                    if fn.lower().endswith("_waste.parquet"): label += " (waste)"
+                    g["sub_lines"][label] = vals
+            pdfs = sorted(glob.glob(str(target_dir / f"*{bid}_*subparts*.pdf")))
+            if pdfs:
+                with open(pdfs[0], "rb") as fh:
+                    g["pdf"] = f"data:application/pdf;base64,{base64.b64encode(fh.read()).decode()}"
+            comp_groups.append(g)
 
-            
-            for pdf_path in pdf_files:
-                filename = os.path.basename(pdf_path)
-                try:
-                    if not filename.startswith(prefix): continue
-                    remainder = filename[len(prefix):]
-                    name_part = remainder.split("_cumulative")[0]
-                    
-                    with open(pdf_path, "rb") as f:
-                        b64 = f"data:application/pdf;base64,{base64.b64encode(f.read()).decode()}"
-                        
-                    
-                    if "subparts" in name_part:
-                        base_name = name_part.replace("_subparts", "")
-                        if base_name == f"{building_type} including waste":
-                            get_topic("1. Total Lifecycle (incl. Waste)")["pdf"] = b64
-                        elif base_name == building_type:
-                            get_topic("2. Building Components Summary")["pdf"] = b64
-                        else:
-                            get_topic(f"3. Breakdown: {base_name}")["pdf"] = b64
-                    else:
-                        if name_part == f"{building_type} including waste":
-                            if not get_topic("1. Total Lifecycle (incl. Waste)")["pdf"]: get_topic("1. Total Lifecycle (incl. Waste)")["pdf"] = b64
-                        elif name_part == f"{building_type} total":
-                            if not get_topic("2. Building Components Summary")["pdf"]: get_topic("2. Building Components Summary")["pdf"] = b64
-                        elif name_part.endswith(" total"):
-                            comp = name_part.replace(" total", "")
-                            if not get_topic(f"3. Breakdown: {comp}")["pdf"]: get_topic(f"3. Breakdown: {comp}")["pdf"] = b64
-                except Exception as e:
-                    print(f"Error parsing PDF {filename}: {e}")
-
-        
-        output_groups = [topics[k] for k in sorted(topics.keys()) if topics[k]["total_line"] or topics[k]["sub_lines"] or topics[k]["pdf"]]
+        # Overall group, in the same style as the manual-input dashboard:
+        # summed curve as total, per-component curves as legend lines
+        n_pts = max((len(g["total_line"]) for g in comp_groups), default=0)
+        summed = [0.0] * n_pts
+        for g in comp_groups:
+            for i, v in enumerate(g["total_line"]):
+                summed[i] += v
+        total_val = summed[-1] if summed else 0.0
+        overall = {
+            "name": "1. Total Lifecycle (incl. Waste)",
+            "total_line": summed,
+            "sub_lines": {g["name"].replace("3. Breakdown: ", ""): g["total_line"]
+                          for g in comp_groups if g["total_line"]},
+            "pdf": None,
+        }
+        groups = [overall] + comp_groups
 
         return jsonify({
             "status": "success",
             "total_impact": float(total_val),
-            "groups": output_groups
+            "groups": groups,
+            "note": "Per-component calculation. B6 operational energy excluded."
+                    + (f" Skipped (not in database): {skipped}" if skipped else "")
         }), 200
 
     except Exception as e:

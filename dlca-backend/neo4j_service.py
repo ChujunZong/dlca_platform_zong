@@ -4,8 +4,8 @@ from neo4j.graph import Node, Relationship, Path
 
 bp = Blueprint("neo4j_service", __name__)
 
-URI = "neo4j+s://c28e52e2.databases.neo4j.io"
-AUTH = ("neo4j", "W9i-1q8QYTY7x-Y7T8KWiyF_-dv3nWfcE8epNhRK5VY")
+URI = "bolt://localhost:7687"
+AUTH = ("neo4j", "neo4j")
 
 driver = GraphDatabase.driver(URI, auth=AUTH, max_connection_lifetime=200)
 
